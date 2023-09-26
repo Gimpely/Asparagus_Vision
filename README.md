@@ -1,8 +1,4 @@
 # Asparagus_Vision
 Vision project for detecting asparagus.
 
-
-
-![]([https://github.com/Gimpely/Asparagus_Vision/assets/22889949/3e1c4848-bc1e-4071-8fd9-5fed66d6f0fd](https://github.com/Gimpely/Asparagus_Vision/blob/main/YOLOv8/Other/masked.gif)https://github.com/Gimpely/Asparagus_Vision/blob/main/YOLOv8/Other/masked.gif) 
-
-
+![masked (1)](https://github.com/Gimpely/Asparagus_Vision/assets/22889949/46395a19-9e10-4c0e-a506-500930c9a801)
