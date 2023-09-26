@@ -1,5 +1,5 @@
 # Asparagus_Vision
-Vision project for detecting asparagus.
+Vision project for detecting asparagus. Currently using YOLOv8 to detect and segment the asparaguses, and use the detected position data from the rgb image to find them on a depth image. 
 
 <table>
   <tr>
