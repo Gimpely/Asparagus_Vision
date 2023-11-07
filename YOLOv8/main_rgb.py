@@ -7,7 +7,50 @@ import math
 import open3d as o3d
 import time
 
+#version 1
+'''
+def update_position_with_odometry(tracking_info, time_elapsed):
+    # Predict new position based on last known position and time elapsed (using constant speed assumption)
+    # This is a simplified 2D odometry prediction, assuming motion in a straight line
+    predicted_movement = 0.3 * time_elapsed  # Your assumed speed in m/s
+    # Update the current point based on the predicted movement
+    tracking_info['current_point'] = (tracking_info['current_point'][0] + predicted_movement,
+                                      tracking_info['current_point'][1],
+                                      tracking_info['current_point'][2])
+    return tracking_info['current_point']
+'''
+#Version 2
+def update_position_with_odometry(tracking_info, time_elapsed, speed=0.3):
+    """
+    Predict new position based on last known position and time elapsed.
+    The camera is facing backward and looking down at a 45-degree angle.
+    Movement will increase the Z coordinate and decrease the Y coordinate equally.
+    """
+    predicted_movement = speed * time_elapsed
+    # Calculate the change in the Y and Z coordinates due to the 45-degree camera angle
+    movement_yz = predicted_movement / math.sqrt(2)  # Divide by sqrt(2) because of 45-degree angle
+    current_point = tracking_info['current_point']
+    # Since the camera is facing backwards, increasing Z coordinate means moving forward.
+    # The Y coordinate decreases because we're looking down at 45 degrees.
+    updated_point = (current_point[0], current_point[1] - movement_yz, current_point[2] + movement_yz)
+    return updated_point
 
+
+def blend_positions(predicted_point, measured_point, odometry_weight=0.2):
+    """
+    Blend the odometry and measured positions using a weighted average.
+    :param predicted_point: The point predicted by odometry.
+    :param measured_point: The point measured by the detection system.
+    :param odometry_weight: The weight given to the odometry data.
+    :return: The blended point.
+    """
+    # Weights must sum up to 1
+    detection_weight = 1 - odometry_weight
+    blended_point = tuple(odometry_weight * p + detection_weight * m for p, m in zip(predicted_point, measured_point))
+    return blended_point
+
+def calculate_distance(point_a, point_b):
+    return np.sqrt((point_a[0] - point_b[0]) ** 2 + (point_a[1] - point_b[1]) ** 2 + (point_a[2] - point_b[2]) ** 2)
 
 def GetBGR(frame_color):
     # Input: Intel handle to 16-bit YU/YV data
@@ -26,12 +69,16 @@ def GetBGR(frame_color):
 # Setup:
 pipe = rs.pipeline()
 cfg = rs.config()
-cfg.enable_device_from_file(r"/home/student/Desktop/Asparagus_Vision-main/YOLOv8/L515_posnetek5.bag")
+#cfg.enable_device_from_file(r"/home/student/Desktop/Asparagus_Vision-main/YOLOv8/L515_posnetek5.bag")
+cfg.enable_device_from_file(r"C:\Users\J\Desktop\Asparagus_deteciton\YOLO\YOLOv8\L515_posnetek5.bag")
 profile = pipe.start(cfg)
 
 model = YOLO("model3s.pt")
 
+tracked_objects = {}
 
+
+previous_time = time.time()
 while True:
 
     frameset = pipe.wait_for_frames()
@@ -53,6 +100,7 @@ while True:
     colorized_depth_aligned = np.asanyarray(colorizer.colorize(aligned_depth_frame).get_data())
 
     
+    
     height, width, channels = frame.shape
 
     results = model.track(source=frame, conf=0.6, iou=0.5,  boxes=False, tracker="bytetrack.yaml",  persist=True, show_labels=False, show_conf=False)
@@ -61,128 +109,108 @@ while True:
 
     annotated_frame = results[0].plot()
 
-    # Display the annotated frame
-    
-    base_points = []
     points_to_display = []
     object_masks = []
-    rolling_avg = 0
-    index = 0
-    if result.masks is not None:
+
+    current_time = time.time()
+    time_elapsed = current_time - previous_time  # Time elapsed since last frame was processed
+    previous_time = current_time 
+    
+    predicted_movement_per_detection  = 0.3 * time_elapsed
+    #if result.masks is not None:
+    if result.masks is not None and results[0].boxes.id is not None:
+        track_ids = results[0].boxes.id.int().cpu().tolist()
+        
         depth_intrinsics = aligned_depth_frame.profile.as_video_stream_profile().intrinsics
 
-        for seg in result.masks.xyn:
+        threshold_height = 20 
+
+        object_point_clouds = []
+        top_mean_points = []
+        
+        points = []
+        points_with_ids = []
+        print("track_ids", track_ids)
+        for index, object_id in enumerate(track_ids):
+       
+            seg = result.masks.xyn[index]
+            
+
             # contours
             seg[:, 0] *= width
             seg[:, 1] *= height
             segment = np.array(seg, dtype=np.int32)
 
             mask = np.zeros((height, width), dtype=np.uint8)
-            # Fill the mask with the segment
+
             cv2.fillPoly(mask, [segment], 255)
             
-            object_masks.append(mask)
-            
-        combined_segmented = np.zeros_like(colorized_depth_aligned)
-
-        segmented_objects = []
-
-        
-        object_point_clouds = []
-        top_mean_points = []
-        
-        cutoff_points = [] 
-
-        for mask in object_masks:
-            pcd = o3d.geometry.PointCloud()
-            points = []
             y_coords, x_coords = np.where(mask)
 
             bottom_y = max(y_coords)
+            if (height - threshold_height) > bottom_y:
 
-            # corresponding_x = x_coords[np.where(y_coords == max_y)]
-            # base_point = (int(np.mean(corresponding_x)), max_y)
-            # base_points.append(base_point)
-
-            for i in range(5):
-                current_y = bottom_y - i*5  # Moving upwards every 10 pixels
-                corresponding_x = x_coords[np.where(y_coords == current_y)]
+                corresponding_x = x_coords[np.where(y_coords == bottom_y)]
                 # Check if there are any x-values for this y-coordinate
                 if len(corresponding_x) > 0:
                     median_x = int(np.median(corresponding_x))
-                    points_to_display.append((median_x, current_y))
+                    points_to_display.append((median_x, bottom_y))
 
-            
+                    depth = aligned_depth_frame.get_distance(median_x, bottom_y)
+                    if depth > 0:
+                        point = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [median_x, bottom_y], depth)
+                        points.append(point)
+                        points_with_ids.append((object_id, point))
 
+        if points_with_ids:
+            for object_id, point in points_with_ids:
+                if object_id not in tracked_objects:
+                    tracked_objects[object_id] = {'initial_point': point, 'current_point': point, 'last_seen': current_time}
+                else:
+                    # Existing object, combine odometry and detection
+                    predicted_point = update_position_with_odometry(tracked_objects[object_id], time_elapsed)
+                    blended_point = blend_positions(predicted_point, point)
+                    tracked_objects[object_id]['current_point'] = blended_point
+                    tracked_objects[object_id]['last_seen'] = current_time
+
+        #predict step
+        current_tracked_ids = [obj_id for obj_id, _ in points_with_ids]
+        for object_id, tracking_info in tracked_objects.items():
+            if object_id not in current_tracked_ids:
+                time_since_last_seen = current_time - tracking_info['last_seen']
+                # Predict new position based on last known position and time elapsed (using constant speed assumption)
+                # This is a simplified 2D odometry prediction, assuming motion in a straight line
+                predicted_movement = 0.3 * time_since_last_seen  # Your assumed speed in m/s
+                # Update the current point based on the predicted movement
+                tracking_info['current_point'] = (tracking_info['current_point'][0] + predicted_movement,
+                                                  tracking_info['current_point'][1],
+                                                  tracking_info['current_point'][2])
+                
+        # Remove objects that have moved more than 2 meters from their initial detection location
+        for object_id in list(tracked_objects.keys()):  # Make a copy of keys to avoid modifying the dict while iterating
+            initial_point = tracked_objects[object_id]['initial_point']
+            current_point = tracked_objects[object_id]['current_point']
+            distance_moved = calculate_distance(initial_point, current_point)
+            if distance_moved > 2.0:
+                del tracked_objects[object_id]
+
+        print("points",len(points))
+    
     for point in points_to_display:
-        cv2.circle(frame, point, radius=2, color=(0, 0, 255), thickness=-1)  # Green color, filled circle
-        cv2.imshow("YOLOv8 Tracking", frame)
+        threshold_height = 20
+        line_y = height - threshold_height
+        #cv2.line(frame, (0, line_y), (width, line_y), (0, 0, 255), 2)  
+        cv2.circle(frame, point, radius=2, color=(0, 0, 255), thickness=-1)  
 
-
-            # for y, x in zip(y_coords, x_coords):
-            #     depth = aligned_depth_frame.get_distance(x, y)
-            #     if depth > 0:
-            #         point = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [x, y], depth)
-            #         points.append(point)
-
-            # if points:
-            #     pcd.points = o3d.utility.Vector3dVector(points)
-            #     pcd, ind = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
-            #     downsampled_pcd = pcd#pcd.voxel_down_sample(voxel_size=0.01)
-
-            #     angle_radians = np.radians(45)
-            #     flip_transform = np.array([[1, 0, 0, 0],
-            #                             [0, np.cos(angle_radians), -np.sin(angle_radians), 0],
-            #                             [0, np.sin(angle_radians), np.cos(angle_radians), 0],
-            #                             [0, 0, 0, 1]])
-            #     downsampled_pcd.transform(flip_transform)
-
-            #     points = np.asarray(downsampled_pcd.points)
-            #     if len(downsampled_pcd.points) > 500:
-                        
-
-            #         object_point_clouds.append(downsampled_pcd)
-                    
-
-            #         # Getting the top and bottom points
-            #         NofP = 20
-            #         np_points = np.asarray(downsampled_pcd.points)
-            #         z_values = np_points[:, 2]
-
-            #         sorted_indices = np.argsort(z_values)  # Sort points by z-coordinate in descending order
-            #         top_indices = sorted_indices[:NofP]  # Get the indices of the top N points
-            #         top_mean_point = np.mean(np_points[top_indices], axis=0)  # Compute the mean of the top N points
-            #         top_mean_points.append(top_mean_point)
-
-            #         bottom_indices = sorted_indices[-NofP:]
-            #         bottom_mean_point = np.mean(np_points[bottom_indices], axis=0)
-            #         bottom_mean_points.append(bottom_mean_point)
-
-
-            #         z_distance = abs(top_mean_point[2] - bottom_mean_point[2])
-                    
-            #         if z_distance > 0.05:
-            #             print("----------------------------------------------------------")
-            #             sorted_points = np_points[sorted_indices]
-            #             rounded_z_values = np.around(z_values, 3)
-            #             unique_z = np.unique(rounded_z_values)
-
-            
-
+    for object_id, tracking_info in tracked_objects.items():
+        # Draw the current blended position
+        point_3d = tracking_info['current_point']
+        pixel_coordinates = rs.rs2_project_point_to_pixel(depth_intrinsics, point_3d)
+        cv2.circle(frame, (int(pixel_coordinates[0]), int(pixel_coordinates[1])), radius=4, color=(255, 0, 0), thickness=-1)  # Blue for blended point
         
-            #TODO
-            #-Omeji base tocko da je lahko le do dolocene visine, nesme bit nad tlemi
-            #-Bottom point naj bi bil na zunanji strani / najbljizji tocki do izhodisca
+    cv2.imshow("YOLOv8 Tracking", frame)
+    print("points", tracked_objects)
 
-            
-    else:
-        combined_segmented = np.zeros_like(colorized_depth_aligned)
-
-
-
-    # Visualize the results on the frame
-    
-    
     
     # Break the loop if 'q' is pressed
     if cv2.waitKey(1) & 0xFF == ord("q"):
